@@ -62,29 +62,25 @@ class AccountMove(models.Model):
         for invoice in self:
             total_untaxed = 0.0
             total_tax = 0.0
-            original_product_price = 0.0
-
             for line in invoice.invoice_line_ids:
-                line_price = line.price_unit * (1 - (line.discount or 0.0) / 100.0)
+                price_unit = line.price_unit * (1 - (line.discount or 0.0) / 100.0)
                 taxes = line.tax_ids.compute_all(
-                    line_price, 
-                    invoice.currency_id, 
-                    line.quantity, 
-                    product=line.product_id, 
+                    price_unit,
+                    invoice.currency_id,
+                    line.quantity,
+                    product=line.product_id,
                     partner=invoice.partner_id
                 )
                 total_untaxed += taxes['total_excluded']
                 total_tax += sum(t.get('amount', 0.0) for t in taxes['taxes'])
-                original_product_price += line.price_unit * line.quantity
-
-            invoice.amount_untaxed = total_untaxed
+            invoice.amount_untaxed = total_untaxed - total_tax
             invoice.amount_tax = total_tax
-            invoice.amount_total = original_product_price
+            invoice.amount_total = invoice.amount_untaxed + invoice.amount_tax 
 
     @api.onchange('invoice_line_ids', 'invoice_line_ids.tax_ids')
     def _onchange_invoice_line_ids(self):
         self._compute_amount()
-
+        
 # Sale Order
 class SaleOrder(models.Model):
     _inherit = 'sale.order'
@@ -144,6 +140,7 @@ class SaleOrderLine(models.Model):
             )
             
             line.price_total = price * line.product_uom_qty
+            # line.price_total = line.price_unit * line.product_uom_qtyx``
             line.price_tax = sum(t.get('amount', 0.0) for t in taxes['taxes'])
             line.price_subtotal = line.price_total - line.price_tax
 
