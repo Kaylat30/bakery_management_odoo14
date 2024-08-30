@@ -1,0 +1,7 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_account_journal_user,access_account_journal_user,model_account_journal,,1,0,0,0
+access_account_payment_user,access_account_payment_user,model_account_payment,,1,0,0,0
+access_account_payment_register_user,access_account_payment_register_user,model_account_payment_register,,1,0,0,0
+access_account_move_user,access_account_move_user,model_account_move,,1,0,0,0
+access_sale_order_user,access_sale_order_user,model_sale_order,,1,0,0,0
+access_sale_order_line_user,access_sale_order_line_user,model_sale_order_line,,1,0,0,0
