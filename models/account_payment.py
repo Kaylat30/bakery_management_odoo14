@@ -21,6 +21,15 @@ class AccountPayment(models.Model):
     _inherit = 'account.payment'
 
     transaction_id = fields.Char(string="Transaction ID", store=True)
+    amount = fields.Monetary(string='Amount', required=True)
+
+    @api.model
+    def create(self, vals):
+        # Ensure that the amount from the wizard is used when creating the payment
+        if self.env.context.get('active_model') == 'account.payment.register':
+            wizard = self.env['account.payment.register'].browse(self.env.context.get('active_id'))
+            vals['amount'] = wizard.amount
+        return super(AccountPayment, self).create(vals)
 
 # Account Payment Register
 class AccountPaymentRegister(models.TransientModel):
@@ -28,6 +37,20 @@ class AccountPaymentRegister(models.TransientModel):
 
     transaction_id = fields.Char(string="Transaction ID")
     show_transaction_id = fields.Boolean(compute='_compute_show_transaction_id')
+    source_amount = fields.Monetary(string='Source Amount', required=True, compute='_compute_amount', store=True)
+    source_amount_currency = fields.Monetary(string='Source Amount Currency', required=True, compute='_compute_amount', store=True)
+    amount = fields.Monetary(string='Amount', required=True)
+
+    @api.depends('source_amount', 'source_amount_currency', 'source_currency_id', 'company_id', 'currency_id', 'payment_date')
+    def _compute_amount(self):
+        for wizard in self:
+            move = wizard.env['account.move'].browse(self.env.context.get('active_ids', [])[:1])
+            if move:
+                wizard.source_amount = move.amount_residual
+                wizard.source_amount_currency = wizard.source_amount
+                # Set a default value for amount, but allow it to be editable
+                if not wizard.amount:
+                    wizard.amount = wizard.source_amount
 
     @api.depends('journal_id')
     def _compute_show_transaction_id(self):
@@ -48,12 +71,38 @@ class AccountPaymentRegister(models.TransientModel):
                 raise ValidationError("Transaction ID is required for this journal.")
 
     def _create_payment_vals_from_wizard(self):
-        payment_vals = super()._create_payment_vals_from_wizard()
+        payment_vals = super(AccountPaymentRegister, self)._create_payment_vals_from_wizard()
         if self.transaction_id:
             payment_vals['transaction_id'] = self.transaction_id
+        # Ensure the amount from the wizard is used
+        payment_vals['amount'] = self.amount
         return payment_vals
 
-# Account Move (Invoice)
+    def action_create_payments(self):
+        payments = self._create_payments()
+
+        if self._context.get('dont_redirect_to_payments'):
+            return True
+
+        action = {
+            'name': _('Payments'),
+            'type': 'ir.actions.act_window',
+            'res_model': 'account.payment',
+            'context': {'create': False},
+        }
+        if len(payments) == 1:
+            action.update({
+                'view_mode': 'form',
+                'res_id': payments.id,
+            })
+        else:
+            action.update({
+                'view_mode': 'tree,form',
+                'domain': [('id', 'in', payments.id)],
+            })
+        return action
+
+# Account Move
 class AccountMove(models.Model):
     _inherit = 'account.move'
 
@@ -86,24 +135,20 @@ class AccountMove(models.Model):
             invoice.amount_tax = total_tax
             invoice.amount_total = invoice.amount_untaxed + invoice.amount_tax
             
-            # Set amount_residual initially to amount_total
-            invoice.amount_residual = invoice.amount_total
-            
-            # Calculate sign based on move_type
-            sign = -1 if invoice.move_type in ['in_refund', 'out_refund'] else 1
-            
-            # Calculate the sum of line residuals
+            # Calculate the sum of line residuals (outstanding balance per line)
             sum_residuals = sum(
                 line.amount_residual 
                 for line in invoice.line_ids.filtered(lambda l: l.account_id.user_type_id.type in ('receivable', 'payable'))
             )
             
-            # Update amount_residual only if payments have been made
-            if abs(sum_residuals) < abs(invoice.amount_total):
-                invoice.amount_residual = sum_residuals
+            # Update amount_residual based on the payment status
+            invoice.amount_residual = sum_residuals - total_tax
+
+            # Determine the sign based on the move type
+            sign = -1 if invoice.move_type in ['in_refund', 'out_refund'] else 1
             
             # Set signed amounts
-            invoice.amount_residual_signed = sign * abs(invoice.amount_residual)
+            invoice.amount_residual_signed = sign * invoice.amount_residual
             invoice.amount_untaxed_signed = sign * invoice.amount_untaxed
             invoice.amount_tax_signed = sign * invoice.amount_tax
             invoice.amount_total_signed = sign * invoice.amount_total
@@ -129,7 +174,6 @@ class AccountMove(models.Model):
     def onchange_invoice_line_ids(self):
         self._compute_amount()
         self._compute_payment_state()
-
 
 # Sale Order
 class SaleOrder(models.Model):
