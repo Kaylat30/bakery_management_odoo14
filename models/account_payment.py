@@ -1,6 +1,5 @@
 from odoo import models, fields, api
 from odoo.exceptions import ValidationError
-from odoo.exceptions import UserError
 import logging
 
 _logger = logging.getLogger(__name__)
@@ -9,48 +8,21 @@ _logger = logging.getLogger(__name__)
 class AccountJournal(models.Model):
     _inherit = 'account.journal'
 
-    show_transaction_id = fields.Boolean(string="Show Transaction ID", compute='_compute_show_transaction_id', store=True)
+    show_transaction_id = fields.Boolean(string="Show Transaction ID")
 
-    @api.depends('name')
-    def _compute_show_transaction_id(self):
-        for record in self:
-            record.show_transaction_id = record.name in ['Momo Pay', 'Airtel Pay']
 
-# Account Payment
 class AccountPayment(models.Model):
     _inherit = 'account.payment'
 
-    transaction_id = fields.Char(string="Transaction ID", store=True)
-    amount = fields.Monetary(string='Amount', required=True)
+    transaction_id = fields.Char(string="Transaction ID")
 
-    @api.model
-    def create(self, vals):
-        # Ensure that the amount from the wizard is used when creating the payment
-        if self.env.context.get('active_model') == 'account.payment.register':
-            wizard = self.env['account.payment.register'].browse(self.env.context.get('active_id'))
-            vals['amount'] = wizard.amount
-        return super(AccountPayment, self).create(vals)
 
 # Account Payment Register
 class AccountPaymentRegister(models.TransientModel):
     _inherit = 'account.payment.register'
 
-    transaction_id = fields.Char(string="Transaction ID")
-    show_transaction_id = fields.Boolean(compute='_compute_show_transaction_id')
-    source_amount = fields.Monetary(string='Source Amount', required=True, compute='_compute_amount', store=True)
-    source_amount_currency = fields.Monetary(string='Source Amount Currency', required=True, compute='_compute_amount', store=True)
-    amount = fields.Monetary(string='Amount', required=True)
-
-    @api.depends('source_amount', 'source_amount_currency', 'source_currency_id', 'company_id', 'currency_id', 'payment_date')
-    def _compute_amount(self):
-        for wizard in self:
-            move = wizard.env['account.move'].browse(self.env.context.get('active_ids', [])[:1])
-            if move:
-                wizard.source_amount = move.amount_residual
-                wizard.source_amount_currency = wizard.source_amount
-                # Set a default value for amount, but allow it to be editable
-                if not wizard.amount:
-                    wizard.amount = wizard.source_amount
+    show_transaction_id = fields.Boolean(related='journal_id.show_transaction_id', string="Show Transaction ID", store=True)
+    transaction_id = fields.Char(string="Transaction ID", store=True)
 
     @api.depends('journal_id')
     def _compute_show_transaction_id(self):
@@ -74,126 +46,18 @@ class AccountPaymentRegister(models.TransientModel):
         payment_vals = super(AccountPaymentRegister, self)._create_payment_vals_from_wizard()
         if self.transaction_id:
             payment_vals['transaction_id'] = self.transaction_id
-        # Ensure the amount from the wizard is used
         payment_vals['amount'] = self.amount
         return payment_vals
-
-    def action_create_payments(self):
-        payments = self._create_payments()
-
-        if self._context.get('dont_redirect_to_payments'):
-            return True
-
-        action = {
-            'name': _('Payments'),
-            'type': 'ir.actions.act_window',
-            'res_model': 'account.payment',
-            'context': {'create': False},
-        }
-        if len(payments) == 1:
-            action.update({
-                'view_mode': 'form',
-                'res_id': payments.id,
-            })
-        else:
-            action.update({
-                'view_mode': 'tree,form',
-                'domain': [('id', 'in', payments.id)],
-            })
-        return action
 
 # Account Move
 class AccountMove(models.Model):
     _inherit = 'account.move'
 
-    transaction_id = fields.Char(string="Transaction ID", related='payment_id.transaction_id', store=True, readonly=True)
-    amount_untaxed = fields.Monetary(string='Untaxed Amount', store=True, readonly=True, compute='_compute_amount')
-    amount_tax = fields.Monetary(string='Tax', store=True, readonly=True, compute='_compute_amount')
-    amount_total = fields.Monetary(string='Total', store=True, readonly=True, compute='_compute_amount')
-    amount_residual = fields.Monetary(string='Residual Amount', store=True, readonly=True, compute='_compute_amount')
-    amount_untaxed_signed = fields.Monetary(string='Untaxed Amount Signed', store=True, readonly=True, compute='_compute_amount')
-    amount_tax_signed = fields.Monetary(string='Tax Amount Signed', store=True, readonly=True, compute='_compute_amount')
-    amount_total_signed = fields.Monetary(string='Total Amount Signed', store=True, readonly=True, compute='_compute_amount')
-    amount_residual_signed = fields.Monetary(string='Residual Amount Signed', store=True, readonly=True, compute='_compute_amount')
+    transaction_id = fields.Char(string='Transaction ID')
     
-    payment_state = fields.Selection([
-        ('not_paid', 'Not Paid'),
-        ('in_payment', 'In Payment'),
-        ('paid', 'Paid'),
-        ('partial', 'Partially Paid'),
-        ('reversed', 'Reversed')
-    ], string='Payment State', default='not_paid', store=True, compute='_compute_payment_state')
-
-    @api.depends('invoice_line_ids.price_subtotal', 'invoice_line_ids.tax_ids', 'line_ids.amount_residual', 'line_ids.payment_id', 'state')
-    def _compute_amount(self):
-        for invoice in self:
-            # Calculate totals
-            total_untaxed = sum(line.price_subtotal for line in invoice.invoice_line_ids)
-            total_tax = sum(line.price_total - line.price_subtotal for line in invoice.invoice_line_ids)
-            
-            invoice.amount_untaxed = total_untaxed - total_tax
-            invoice.amount_tax = total_tax
-            invoice.amount_total = invoice.amount_untaxed + invoice.amount_tax
-            
-            # Calculate the sum of line residuals (outstanding balance per line)
-            sum_residuals = sum(
-                line.amount_residual 
-                for line in invoice.line_ids.filtered(lambda l: l.account_id.user_type_id.type in ('receivable', 'payable'))
-            )
-            
-            # Update amount_residual based on the payment status
-            invoice.amount_residual = sum_residuals - total_tax
-
-            # Determine the sign based on the move type
-            sign = -1 if invoice.move_type in ['in_refund', 'out_refund'] else 1
-            
-            # Set signed amounts
-            invoice.amount_residual_signed = sign * invoice.amount_residual
-            invoice.amount_untaxed_signed = sign * invoice.amount_untaxed
-            invoice.amount_tax_signed = sign * invoice.amount_tax
-            invoice.amount_total_signed = sign * invoice.amount_total
-
-
-    @api.depends('amount_residual', 'amount_total', 'line_ids.payment_id.state', 'state')
-    def _compute_payment_state(self):
-        for invoice in self:
-            if invoice.state != 'posted':
-                invoice.payment_state = 'not_paid'
-            elif invoice.amount_residual == 0:                
-                invoice.payment_state = 'paid'                
-            elif 0 < invoice.amount_residual < invoice.amount_total:
-                invoice.payment_state = 'partial'
-            elif invoice.line_ids.payment_id.filtered(lambda p: p.state == 'posted'):
-                invoice.payment_state = 'in_payment'
-            elif invoice.reversal_move_id and invoice.reversal_move_id.state == 'posted':
-                invoice.payment_state = 'reversed'
-            else:
-                invoice.payment_state = 'not_paid'
-
-    @api.onchange('invoice_line_ids', 'invoice_line_ids.tax_ids')
-    def onchange_invoice_line_ids(self):
-        self._compute_amount()
-        self._compute_payment_state()
-
 # Sale Order
 class SaleOrder(models.Model):
     _inherit = 'sale.order'
-
-    amount_untaxed = fields.Monetary(compute='_compute_amount', store=True, readonly=True)
-    amount_tax = fields.Monetary(compute='_compute_amount', store=True, readonly=True)
-    amount_total = fields.Monetary(compute='_compute_amount', store=True, readonly=True)
-
-    @api.depends('order_line.price_total', 'order_line.price_subtotal', 'order_line.price_tax')
-    def _compute_amount(self):
-        for order in self:
-            amount_untaxed = sum(order.order_line.mapped('price_subtotal')) - sum(order.order_line.mapped('price_tax'))
-            amount_tax = sum(order.order_line.mapped('price_tax'))
-            amount_total = sum(order.order_line.mapped('price_total'))
-            order.update({
-                'amount_untaxed': amount_untaxed,
-                'amount_tax': amount_tax,
-                'amount_total': amount_total,
-            })
 
     def action_confirm(self):
             # Call the original method to ensure standard functionality is preserved
@@ -226,34 +90,6 @@ class SaleOrder(models.Model):
 
         return True        
    
-# Sale Order Line
-class SaleOrderLine(models.Model):
-    _inherit = 'sale.order.line'
-
-    @api.depends('product_id', 'price_unit', 'product_uom_qty', 'tax_id')
-    def _compute_amount(self):
-        for line in self:
-            price = line.price_unit * (1 - (line.discount or 0.0) / 100.0)
-            taxes = line.tax_id.compute_all(
-                price,
-                line.order_id.currency_id,
-                line.product_uom_qty,
-                product=line.product_id,
-                partner=line.order_id.partner_shipping_id
-            )
-            
-            
-            line.price_total = line.price_unit * line.product_uom_qty
-            line.price_tax = sum(t.get('amount', 0.0) for t in taxes['taxes'])
-            line.price_subtotal = line.price_total
-
-    @api.depends('price_subtotal', 'price_total')
-    def _get_price_reduce(self):
-        for line in self:
-            line.price_reduce = line.price_total / line.product_uom_qty if line.product_uom_qty else 0.0
-            line.price_reduce_taxinc = line.price_total / line.product_uom_qty if line.product_uom_qty else 0.0
-            line.price_reduce_taxexcl = line.price_subtotal / line.product_uom_qty if line.product_uom_qty else 0.0
-
 
 
 

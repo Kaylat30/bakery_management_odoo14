@@ -5,7 +5,6 @@
             <field name="model">account.payment</field>
             <field name="inherit_id" ref="account.view_account_payment_form"/>
             <field name="arch" type="xml">
-                <!-- Display the transaction_id field without any conditions -->
                 <xpath expr="//group[@name='group3']" position="inside">
                     <field name="transaction_id"/>
                 </xpath>
